@@ -51,6 +51,9 @@ import usb.core
 import usb.util
 import requests
 import schedule
+import serial
+import time
+import struct
 
 # We will try to import serial (for Alexander's feature)
 try:
@@ -102,6 +105,37 @@ usb_product_id_str = DEVICE_AND_NOISE_MONITORING_CONFIG.get("usb_product_id", ""
 
 usb_vendor_id_int = int(usb_vendor_id_str, 16) if usb_vendor_id_str else None
 usb_product_id_int = int(usb_product_id_str, 16) if usb_product_id_str else None
+
+## from https://github.com/silkyclouds/NoiseBuster/issues/8#issuecomment-2924766755
+class HY1361:
+    def __init__(self, port='/dev/ttyUSB0'):
+        try:
+            self.ser = serial.Serial(
+                port=port,
+                baudrate=115200,
+                bytesize=8,
+                parity='N',
+                stopbits=1,
+                timeout=1
+            )
+            print(f"Connected to HY1361 on {port}")
+        except serial.SerialException as e:
+            print("Serial connection error:", e)
+            exit(1)
+
+    def read_packet(self):
+        while True:
+            byte = self.ser.read(1)
+            if byte == b'\x55':  # Start byte
+                frame = byte + self.ser.read(5)
+                if len(frame) == 6 and frame[5] == 0xAA:
+                    #value = struct.unpack('<H', frame[2:4])[0]
+                    value = (frame[1] << 8) | frame[2]
+                    return value / 10.0
+                else:
+                    print(f"Invalid packet: {frame.hex()}")
+            else:
+                continue
 
 ####################################
 # LOGGING CONFIGURATION
@@ -695,7 +729,7 @@ def update_noise_level():
     while True:
         current_time = time.time()
         if (current_time - window_start_time) >= DEVICE_AND_NOISE_MONITORING_CONFIG['time_window_duration']:
-            timestamp = datetime.utcnow()
+            timestamp = datetime.now(timezone.utc)
             delete_old_images()
             logger.info(f"Time window elapsed. Current peak dB: {round(current_peak_dB, 1)}")
 
@@ -772,14 +806,13 @@ def update_noise_level():
         # Reading from device
         try:
             if ser_dev:
-                line = ser_dev.readline().decode().strip()
-                if line:
-                    dB = float(line)
-                    if dB > current_peak_dB:
-                        current_peak_dB = dB
-                        if WEATHER_CONFIG.get("enabled"):
-                            peak_temperature, peak_weather_description, p = get_weather()
-                            peak_precipitation_float = float(p)
+                dB = meter.read_packet()
+                logger.info(f"Sound Level: {dB:.1f} dB")
+                if dB > current_peak_dB:
+                    current_peak_dB = dB
+                    if WEATHER_CONFIG.get("enabled"):
+                        peak_temperature, peak_weather_description, p = get_weather()
+                        peak_precipitation_float = float(p)
             elif usb_dev:
                 ret = usb_dev.ctrl_transfer(0xC0, 4, 0, 0, 200)
                 dB = (ret[0] + ((ret[1] & 3) * 256)) * 0.1 + 30
@@ -992,4 +1025,5 @@ def main():
         logger.info("Manual interruption by user.")
 
 if __name__ == "__main__":
+    meter = HY1361()
     main()
